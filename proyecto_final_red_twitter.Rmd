@@ -1,0 +1,1420 @@
+---
+title: 'Proyecto final: relevancia observable en una red de Twitter'
+author:
+- Pablo Cambria (1136587)
+- Nataniel Félix (1135396)
+- Braian López (1137007)
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+    code_folding: hide
+  word_document:
+    toc: true
+    number_sections: true
+  pdf_document:
+    toc: true
+lang: es
+subtitle: Reporte técnico reproducible en R
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  fig.width = 10,
+  fig.height = 6,
+  dpi = 180
+)
+
+set.seed(123)
+```
+
+# 1. Objetivo y alcance
+
+Este reporte analiza la red social conformada por cuentas de Twitter a partir del archivo `mensajes.csv`. El propósito es identificar los elementos más relevantes de la conversación y responder dos preguntas exploratorias:
+
+1. **¿Qué hace relevante a un usuario dentro de la conversación observada?**
+2. **¿Qué características se asocian con una mayor probabilidad de que un tweet alcance alta relevancia observable?**
+
+La relevancia no se interpreta como una medida absoluta de importancia fuera de la plataforma. En este reporte se utiliza el concepto de **relevancia observable**, entendido como la combinación de alcance, respuesta de la audiencia, atención recibida e influencia estructural dentro de la red analizada.
+
+# Reproducibilidad y carga de datos
+
+## Paquetes requeridos
+
+```{r packages}
+paquetes_requeridos <- c(
+  "readr", "dplyr", "tidyr", "stringr", "lubridate",
+  "ggplot2", "igraph", "ggraph", "ggrepel", "knitr"
+)
+
+paquetes_faltantes <- paquetes_requeridos[
+  !vapply(paquetes_requeridos, requireNamespace, logical(1), quietly = TRUE)
+]
+
+if (length(paquetes_faltantes) > 0) {
+  stop(
+    "Instale antes los paquetes faltantes: ",
+    paste(paquetes_faltantes, collapse = ", ")
+  )
+}
+
+library(readr)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(lubridate)
+library(ggplot2)
+library(igraph)
+library(ggraph)
+library(ggrepel)
+```
+
+## Lectura de la base
+
+```{r import-data}
+
+data_cruda <- read_csv(
+  "mensajes.csv",
+  locale = locale(encoding = "ISO-8859-1"),
+  show_col_types = FALSE,
+  name_repair = "minimal",
+  progress = FALSE
+)
+
+columnas_requeridas <- c(
+  "user_id", "status_id", "created_at", "screen_name", "text", "source",
+  "display_text_width", "reply_to_status_id", "reply_to_user_id",
+  "reply_to_screen_name", "is_quote", "is_retweet", "favorite_count",
+  "retweet_count", "hashtags", "urls_expanded_url", "media_url", "media_type",
+  "mentions_screen_name", "quoted_screen_name", "retweet_screen_name",
+  "followers_count", "friends_count", "listed_count", "statuses_count",
+  "account_created_at", "verified", "polarity"
+)
+
+columnas_faltantes <- setdiff(columnas_requeridas, names(data_cruda))
+
+if (length(columnas_faltantes) > 0) {
+  stop(
+    "Faltan columnas requeridas en el CSV: ",
+    paste(columnas_faltantes, collapse = ", ")
+  )
+}
+```
+
+# Control de calidad y preparación
+
+## Funciones auxiliares
+
+```{r helper-functions}
+limpiar_cadena <- function(x) {
+  x <- str_squish(as.character(x))
+  x[!is.na(x) & x == ""] <- NA_character_
+  x
+}
+
+limpiar_handle <- function(x) {
+  x <- limpiar_cadena(x)
+  x <- str_remove(x, "^@")
+  x <- str_replace_all(x, "\\s+", "")
+  x <- str_to_lower(x)
+  x[!is.na(x) & x == ""] <- NA_character_
+  x
+}
+
+logico_seguro <- function(x) {
+  if (is.logical(x)) {
+    return(replace_na(x, FALSE))
+  }
+
+  x_limpio <- str_to_lower(str_squish(as.character(x)))
+  salida <- rep(FALSE, length(x_limpio))
+  salida[!is.na(x_limpio)] <- x_limpio[!is.na(x_limpio)] %in% c(
+    "true", "t", "1", "yes", "si", "sí"
+  )
+  salida
+}
+
+moda <- function(x) {
+  x <- x[!is.na(x) & x != ""]
+  if (length(x) == 0) return(NA_character_)
+  names(sort(table(x), decreasing = TRUE))[1]
+}
+
+primer_no_na <- function(x) {
+  x <- x[!is.na(x) & x != ""]
+  if (length(x) == 0) return(NA_character_)
+  x[1]
+}
+
+min_seguro <- function(x) {
+  x <- x[is.finite(x)]
+  if (length(x) == 0) return(NA_real_)
+  min(x)
+}
+
+max_seguro <- function(x) {
+  x <- x[is.finite(x)]
+  if (length(x) == 0) return(NA_real_)
+  max(x)
+}
+
+media_segura <- function(x) {
+  x <- x[is.finite(x)]
+  if (length(x) == 0) return(NA_real_)
+  mean(x)
+}
+
+sd_segura <- function(x) {
+  x <- x[is.finite(x)]
+  if (length(x) < 2) return(NA_real_)
+  sd(x)
+}
+
+percentil_seguro <- function(x) {
+  x <- replace_na(as.numeric(x), 0)
+  if (length(unique(x)) < 2) return(rep(0, length(x)))
+  percent_rank(x)
+}
+
+formato_numero <- function(x) {
+  format(round(x, 0), big.mark = ",", scientific = FALSE, trim = TRUE)
+}
+
+formato_pct <- function(x, digitos = 1) {
+  paste0(format(round(x * 100, digitos), nsmall = digitos), "%")
+}
+
+tema_reporte <- function() {
+  theme_minimal(base_size = 12) +
+    theme(
+      plot.background = element_rect(fill = "#EDEDED", color = NA),
+      panel.background = element_rect(fill = "#EDEDED", color = NA),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_line(color = "white", linewidth = 0.35),
+      plot.title = element_text(face = "bold", color = "#111827"),
+      plot.subtitle = element_text(color = "#374151"),
+      axis.text = element_text(color = "#111827"),
+      axis.title = element_text(color = "#111827"),
+      legend.background = element_rect(fill = "#EDEDED", color = NA),
+      legend.key = element_rect(fill = "#EDEDED", color = NA)
+    )
+}
+```
+
+## Resumen de calidad de datos
+
+Los valores faltantes no se eliminan de manera global. En esta base, muchos valores ausentes representan que una característica no aplica: por ejemplo, un tweet original no tendrá una cuenta destino de respuesta, y un mensaje no citado no tendrá campos de cita.
+
+```{r data-quality-summary}
+resumen_calidad <- tibble::tibble(
+  variable = names(data_cruda),
+  tipo_dato = vapply(data_cruda, function(x) class(x)[1], character(1)),
+  valores_unicos = vapply(data_cruda, function(x) n_distinct(x, na.rm = TRUE), numeric(1)),
+  cantidad_na = vapply(data_cruda, function(x) sum(is.na(x)), numeric(1)),
+  cantidad_vacios = vapply(
+    data_cruda,
+    function(x) sum(!is.na(x) & trimws(as.character(x)) == ""),
+    numeric(1)
+  )
+) |>
+  mutate(
+    total_faltantes = cantidad_na + cantidad_vacios,
+    porcentaje_faltantes = round(total_faltantes / nrow(data_cruda) * 100, 2)
+  ) |>
+  arrange(desc(porcentaje_faltantes), desc(valores_unicos))
+
+knitr::kable(
+  head(resumen_calidad, 15),
+  caption = "Variables con mayor proporción de valores faltantes"
+)
+```
+
+## Construcción de una base mínima por mensaje
+
+```{r create-message-base}
+base_tweets <- data_cruda |>
+  transmute(
+    id_tweet = as.character(status_id),
+    usuario_id = as.character(user_id),
+    screen_name = limpiar_handle(screen_name),
+    texto = limpiar_cadena(text),
+    fecha_tweet = ymd_hms(created_at, tz = "UTC", quiet = TRUE),
+    fecha_creacion_cuenta = ymd_hms(account_created_at, tz = "UTC", quiet = TRUE),
+    fuente = limpiar_cadena(source),
+    ancho_texto = suppressWarnings(as.numeric(display_text_width)),
+    es_cita = logico_seguro(is_quote),
+    es_retweet = logico_seguro(is_retweet),
+    reply_to_status_id = as.character(reply_to_status_id),
+    reply_to_user_id = as.character(reply_to_user_id),
+    reply_to_screen_name = limpiar_handle(reply_to_screen_name),
+    retweet_screen_name = limpiar_handle(retweet_screen_name),
+    quoted_screen_name = limpiar_handle(quoted_screen_name),
+    mentions_screen_name = limpiar_cadena(mentions_screen_name),
+    hashtags = limpiar_cadena(hashtags),
+    tiene_url = !is.na(limpiar_cadena(urls_expanded_url)),
+    tiene_media = !is.na(limpiar_cadena(media_url)),
+    media_type = limpiar_cadena(media_type),
+    polaridad = str_to_lower(limpiar_cadena(polarity)),
+    favoritos = coalesce(suppressWarnings(as.numeric(favorite_count)), 0),
+    retweets = coalesce(suppressWarnings(as.numeric(retweet_count)), 0),
+    seguidores = coalesce(suppressWarnings(as.numeric(followers_count)), 0),
+    seguidos = coalesce(suppressWarnings(as.numeric(friends_count)), 0),
+    veces_en_listas = coalesce(suppressWarnings(as.numeric(listed_count)), 0),
+    tweets_historicos = coalesce(suppressWarnings(as.numeric(statuses_count)), 0),
+    cuenta_verificada = logico_seguro(verified)
+  ) |>
+  distinct(id_tweet, .keep_all = TRUE) |>
+  mutate(
+    es_respuesta = !is.na(reply_to_status_id) |
+      !is.na(reply_to_user_id) |
+      !is.na(reply_to_screen_name),
+    tiene_hashtag = !is.na(hashtags),
+    tiene_mencion = !is.na(mentions_screen_name),
+    cantidad_hashtags = if_else(tiene_hashtag, str_count(hashtags, "\\S+"), 0L),
+    cantidad_menciones = if_else(tiene_mencion, str_count(mentions_screen_name, "\\S+"), 0L),
+    tipo_mensaje = case_when(
+      es_retweet ~ "Retweet",
+      es_cita ~ "Cita",
+      es_respuesta ~ "Respuesta",
+      TRUE ~ "Original"
+    ),
+    tipo_mensaje = factor(
+      tipo_mensaje,
+      levels = c("Retweet", "Respuesta", "Original", "Cita")
+    )
+  )
+
+fecha_corte <- max(base_tweets$fecha_tweet, na.rm = TRUE)
+
+base_tweets <- base_tweets |>
+  mutate(
+    antiguedad_cuenta_anios = as.numeric(
+      difftime(fecha_corte, fecha_creacion_cuenta, units = "days")
+    ) / 365.25,
+    antiguedad_cuenta_anios = if_else(
+      antiguedad_cuenta_anios >= 0,
+      antiguedad_cuenta_anios,
+      NA_real_
+    )
+  )
+
+resumen_general <- tibble::tibble(
+  indicador = c(
+    "Mensajes analizados",
+    "Status ID únicos",
+    "Cuentas emisoras distintas",
+    "Variables originales",
+    "Inicio del período",
+    "Fin del período"
+  ),
+  valor = c(
+    formato_numero(nrow(base_tweets)),
+    formato_numero(n_distinct(base_tweets$id_tweet)),
+    formato_numero(n_distinct(base_tweets$usuario_id)),
+    formato_numero(ncol(data_cruda)),
+    format(min(base_tweets$fecha_tweet, na.rm = TRUE), "%d-%m-%Y"),
+    format(max(base_tweets$fecha_tweet, na.rm = TRUE), "%d-%m-%Y")
+  )
+)
+
+knitr::kable(resumen_general, caption = "Resumen general de la base analizada")
+```
+
+## Exploración inicial de variables seleccionadas
+
+La exploración inicial se concentró en las variables que aportan información para el análisis descriptivo, la construcción de la red y el modelo de relevancia. No se generaron gráficos individuales para identificadores, textos completos, URLs o nombres de usuario, debido a que presentan alta cardinalidad: la mayoría de sus valores son únicos y un gráfico de barras no ofrece una interpretación útil.
+
+En cambio, se validó la unicidad de los identificadores, la presencia de los principales tipos de interacción, la disponibilidad de contenido adicional y la distribución de variables numéricas relevantes.
+
+### Validación de identificadores
+
+```{r exploratory-id-validation}
+validacion_identificadores <- tibble(
+  indicador = c(
+    "Registros en el archivo original",
+    "Status ID únicos",
+    "Status ID duplicados",
+    "Status ID faltantes o vacíos",
+    "Cuentas emisoras únicas"
+  ),
+  valor = c(
+    nrow(data_cruda),
+    n_distinct(data_cruda$status_id),
+    sum(duplicated(data_cruda$status_id)),
+    sum(
+      is.na(data_cruda$status_id) |
+        trimws(as.character(data_cruda$status_id)) == ""
+    ),
+    n_distinct(base_tweets$usuario_id)
+  )
+) |>
+  mutate(valor = formato_numero(valor))
+
+knitr::kable(
+  validacion_identificadores,
+  caption = "Validación de identificadores de mensajes y cuentas"
+)
+```
+
+El identificador `status_id` se utilizó como clave del mensaje. La validación permite confirmar si cada publicación corresponde a un registro único dentro de la base analizada.
+
+### Presencia de interacciones y elementos de contenido
+
+```{r exploratory-interaction-summary}
+resumen_elementos <- tibble(
+  elemento = c(
+    "Mensajes clasificados como retweet",
+    "Mensajes clasificados como respuesta",
+    "Mensajes clasificados como cita",
+    "Mensajes con al menos una mención",
+    "Mensajes con al menos un hashtag",
+    "Mensajes con URL",
+    "Mensajes con contenido multimedia"
+  ),
+  cantidad = c(
+    sum(base_tweets$es_retweet, na.rm = TRUE),
+    sum(base_tweets$es_respuesta, na.rm = TRUE),
+    sum(base_tweets$es_cita, na.rm = TRUE),
+    sum(base_tweets$tiene_mencion, na.rm = TRUE),
+    sum(base_tweets$tiene_hashtag, na.rm = TRUE),
+    sum(base_tweets$tiene_url, na.rm = TRUE),
+    sum(base_tweets$tiene_media, na.rm = TRUE)
+  )
+) |>
+  mutate(
+    porcentaje = cantidad / nrow(base_tweets),
+    porcentaje = formato_pct(porcentaje)
+  )
+
+knitr::kable(
+  resumen_elementos,
+  caption = "Presencia de interacciones y elementos de contenido en los mensajes"
+)
+```
+
+Esta revisión permitió identificar qué elementos estaban suficientemente representados para incorporarlos al análisis. Las variables de respuesta, retweet, cita, mención y contenido multimedia se trataron como atributos estructurales: su ausencia significa, en muchos casos, que la característica no aplica al mensaje.
+
+### Resumen de variables numéricas relevantes
+
+```{r exploratory-numeric-summary}
+resumen_numerico <- tibble(
+  variable = c(
+    "Ancho visible del texto",
+    "Favoritos recibidos",
+    "Retweets recibidos",
+    "Seguidores del autor",
+    "Cuentas seguidas por el autor"
+  ),
+  minimo = c(
+    min_seguro(base_tweets$ancho_texto),
+    min_seguro(base_tweets$favoritos),
+    min_seguro(base_tweets$retweets),
+    min_seguro(base_tweets$seguidores),
+    min_seguro(base_tweets$seguidos)
+  ),
+  mediana = c(
+    median(base_tweets$ancho_texto, na.rm = TRUE),
+    median(base_tweets$favoritos, na.rm = TRUE),
+    median(base_tweets$retweets, na.rm = TRUE),
+    median(base_tweets$seguidores, na.rm = TRUE),
+    median(base_tweets$seguidos, na.rm = TRUE)
+  ),
+  promedio = c(
+    media_segura(base_tweets$ancho_texto),
+    media_segura(base_tweets$favoritos),
+    media_segura(base_tweets$retweets),
+    media_segura(base_tweets$seguidores),
+    media_segura(base_tweets$seguidos)
+  ),
+  percentil_95 = c(
+    quantile(base_tweets$ancho_texto, 0.95, na.rm = TRUE),
+    quantile(base_tweets$favoritos, 0.95, na.rm = TRUE),
+    quantile(base_tweets$retweets, 0.95, na.rm = TRUE),
+    quantile(base_tweets$seguidores, 0.95, na.rm = TRUE),
+    quantile(base_tweets$seguidos, 0.95, na.rm = TRUE)
+  ),
+  maximo = c(
+    max_seguro(base_tweets$ancho_texto),
+    max_seguro(base_tweets$favoritos),
+    max_seguro(base_tweets$retweets),
+    max_seguro(base_tweets$seguidores),
+    max_seguro(base_tweets$seguidos)
+  )
+) |>
+  mutate(
+    across(
+      c(minimo, mediana, promedio, percentil_95, maximo),
+      ~ formato_numero(.x)
+    )
+  )
+
+knitr::kable(
+  resumen_numerico,
+  caption = "Resumen de variables numéricas seleccionadas"
+)
+```
+
+### Distribución de engagement
+
+Las variables de favoritos y retweets suelen presentar una distribución asimétrica: muchos mensajes reciben pocas interacciones y un grupo reducido concentra valores altos. Por esta razón, se utiliza la transformación `log(1 + x)` para visualizar la distribución sin que los valores extremos oculten el comportamiento general.
+
+```{r exploratory-engagement-distribution, fig.height=5.5}
+engagement_exploratorio <- base_tweets |>
+  select(favoritos, retweets) |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "valor"
+  ) |>
+  mutate(
+    variable = recode(
+      variable,
+      favoritos = "Favoritos recibidos",
+      retweets = "Retweets recibidos"
+    ),
+    valor_log = log1p(valor)
+  )
+
+ggplot(
+  engagement_exploratorio,
+  aes(x = valor_log)
+) +
+  geom_histogram(
+    bins = 30,
+    fill = "#1565A7",
+    color = "white"
+  ) +
+  facet_wrap(
+    ~ variable,
+    scales = "free_y"
+  ) +
+  labs(
+    title = "Distribución exploratoria de interacciones recibidas",
+    subtitle = "Escala logarítmica: log(1 + interacción)",
+    x = "Log(1 + cantidad de interacciones)",
+    y = "Cantidad de mensajes"
+  ) +
+  tema_reporte()
+```
+
+### Polaridad de los mensajes
+
+```{r exploratory-polarity}
+resumen_polaridad <- base_tweets |>
+  filter(!is.na(polaridad)) |>
+  count(polaridad, name = "cantidad") |>
+  mutate(
+    porcentaje = cantidad / sum(cantidad),
+    porcentaje = formato_pct(porcentaje)
+  ) |>
+  arrange(desc(cantidad))
+
+knitr::kable(
+  resumen_polaridad,
+  caption = "Distribución de polaridad de los mensajes"
+)
+```
+
+La exploración permitió seleccionar variables con suficiente información y sentido analítico para las etapas posteriores. En particular, las métricas de interacción, atributos de la cuenta, tipo de mensaje, polaridad, menciones, URLs y contenido multimedia fueron consideradas en la construcción de los datasets analíticos y en el modelo logístico.
+
+# Análisis descriptivo
+
+## Tipos de mensaje
+
+```{r descriptive-message-types}
+resumen_tipos <- base_tweets |>
+  count(tipo_mensaje, name = "cantidad") |>
+  mutate(
+    porcentaje = cantidad / sum(cantidad),
+    destacado = if_else(tipo_mensaje == "Retweet", "Retweet", "Otros")
+  )
+
+knitr::kable(
+  resumen_tipos |>
+    mutate(porcentaje = formato_pct(porcentaje)) |>
+    select(tipo_mensaje, cantidad, porcentaje),
+  caption = "Distribución de mensajes por tipo"
+)
+
+ggplot(resumen_tipos, aes(x = reorder(tipo_mensaje, cantidad), y = cantidad, fill = destacado)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = formato_numero(cantidad)), hjust = -0.12, size = 3.6) +
+  coord_flip() +
+  scale_fill_manual(values = c("Retweet" = "#1565A7", "Otros" = "#6B7280"), guide = "none") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(
+    title = "Distribución por tipo de mensaje",
+    subtitle = "La conversación estuvo dominada por la amplificación mediante retweets.",
+    x = "Tipo de mensaje",
+    y = "Cantidad"
+  ) +
+  tema_reporte()
+```
+
+## Fuentes de publicación
+
+```{r descriptive-sources}
+fuentes_resumen <- base_tweets |>
+  filter(!is.na(fuente)) |>
+  mutate(
+    fuente_agrupada = case_when(
+      fuente %in% c("Twitter for Android", "Twitter for iPhone", "Twitter Web App") ~ fuente,
+      TRUE ~ "Otros"
+    )
+  ) |>
+  count(fuente_agrupada, name = "cantidad") |>
+  mutate(
+    fuente_agrupada = factor(
+      fuente_agrupada,
+      levels = c("Otros", "Twitter Web App", "Twitter for iPhone", "Twitter for Android")
+    )
+  )
+
+ggplot(fuentes_resumen, aes(x = fuente_agrupada, y = cantidad, fill = fuente_agrupada)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = formato_numero(cantidad)), hjust = -0.12, size = 3.6) +
+  coord_flip() +
+  scale_fill_manual(
+    values = c(
+      "Twitter for Android" = "#1565A7",
+      "Twitter for iPhone" = "#1565A7",
+      "Twitter Web App" = "#1565A7",
+      "Otros" = "#6B7280"
+    ),
+    guide = "none"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(
+    title = "Fuentes de publicación",
+    x = "Fuente",
+    y = "Cantidad de mensajes"
+  ) +
+  tema_reporte()
+```
+
+# Dataset por usuario
+
+Cada fila del siguiente dataset representa una cuenta emisora. La tabla reúne actividad, características de perfil, engagement recibido y métricas de red.
+
+```{r user-dataset}
+actividad_usuarios <- base_tweets |>
+  filter(!is.na(usuario_id), !is.na(screen_name)) |>
+  group_by(usuario_id) |>
+  summarise(
+    screen_name = moda(screen_name),
+    fuente_mas_usada = moda(fuente),
+    cantidad_total_mensajes = n(),
+    tweets_originales = sum(tipo_mensaje == "Original"),
+    respuestas_emitidas = sum(tipo_mensaje == "Respuesta"),
+    citas_emitidas = sum(tipo_mensaje == "Cita"),
+    retweets_emitidos = sum(tipo_mensaje == "Retweet"),
+    publicaciones_no_retweet = sum(tipo_mensaje != "Retweet"),
+    ancho_texto_minimo = min_seguro(ancho_texto),
+    ancho_texto_maximo = max_seguro(ancho_texto),
+    ancho_texto_promedio = media_segura(ancho_texto),
+    ancho_texto_desviacion = sd_segura(ancho_texto),
+    hashtags_emitidos = sum(cantidad_hashtags, na.rm = TRUE),
+    menciones_emitidas = sum(cantidad_menciones, na.rm = TRUE),
+    mensajes_con_url = sum(tiene_url, na.rm = TRUE),
+    mensajes_con_multimedia = sum(tiene_media, na.rm = TRUE),
+    likes_recibidos = sum(if_else(tipo_mensaje != "Retweet", favoritos, 0), na.rm = TRUE),
+    retweets_recibidos = sum(if_else(tipo_mensaje != "Retweet", retweets, 0), na.rm = TRUE),
+    engagement_recibido = sum(
+      if_else(tipo_mensaje != "Retweet", favoritos + retweets, 0),
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+
+perfil_usuarios <- base_tweets |>
+  filter(!is.na(usuario_id)) |>
+  arrange(usuario_id, fecha_tweet) |>
+  group_by(usuario_id) |>
+  slice_tail(n = 1) |>
+  transmute(
+    usuario_id,
+    fecha_creacion_cuenta,
+    antiguedad_cuenta_anios,
+    seguidores_observados = seguidores,
+    seguidos_observados = seguidos,
+    veces_en_listas,
+    tweets_historicos,
+    cuenta_verificada
+  ) |>
+  ungroup()
+```
+
+# Red consolidada de interacciones
+
+La red se construye con cuatro tipos de aristas dirigidas: **menciones, respuestas, retweets y citas**. En todas las aristas, el origen es la cuenta que ejecuta la acción y el destino es la cuenta que la recibe.
+
+## Construcción de aristas
+
+```{r build-edges}
+diccionario_usuarios <- base_tweets |>
+  filter(!is.na(usuario_id), !is.na(screen_name)) |>
+  group_by(usuario_id) |>
+  summarise(destino_por_id = primer_no_na(screen_name), .groups = "drop")
+
+aristas_menciones <- base_tweets |>
+  filter(!is.na(screen_name), !is.na(mentions_screen_name)) |>
+  transmute(
+    id_tweet,
+    origen = screen_name,
+    destino = mentions_screen_name,
+    tipo_interaccion = "Mención"
+  ) |>
+  separate_rows(destino, sep = "\\s+") |>
+  mutate(destino = limpiar_handle(destino)) |>
+  filter(!is.na(origen), !is.na(destino), origen != destino) |>
+  distinct(id_tweet, origen, destino, tipo_interaccion)
+
+aristas_respuestas <- base_tweets |>
+  filter(es_respuesta, !is.na(screen_name)) |>
+  select(id_tweet, origen = screen_name, reply_to_user_id, reply_to_screen_name) |>
+  left_join(diccionario_usuarios, by = c("reply_to_user_id" = "usuario_id")) |>
+  transmute(
+    id_tweet,
+    origen,
+    destino = coalesce(reply_to_screen_name, destino_por_id),
+    tipo_interaccion = "Respuesta"
+  ) |>
+  filter(!is.na(origen), !is.na(destino), origen != destino) |>
+  distinct(id_tweet, origen, destino, tipo_interaccion)
+
+aristas_retweets <- base_tweets |>
+  filter(es_retweet, !is.na(screen_name), !is.na(retweet_screen_name)) |>
+  transmute(
+    id_tweet,
+    origen = screen_name,
+    destino = retweet_screen_name,
+    tipo_interaccion = "Retweet"
+  ) |>
+  filter(origen != destino) |>
+  distinct(id_tweet, origen, destino, tipo_interaccion)
+
+aristas_citas <- base_tweets |>
+  filter(es_cita, !is.na(screen_name), !is.na(quoted_screen_name)) |>
+  transmute(
+    id_tweet,
+    origen = screen_name,
+    destino = quoted_screen_name,
+    tipo_interaccion = "Cita"
+  ) |>
+  filter(origen != destino) |>
+  distinct(id_tweet, origen, destino, tipo_interaccion)
+
+aristas_red <- bind_rows(
+  aristas_menciones,
+  aristas_respuestas,
+  aristas_retweets,
+  aristas_citas
+)
+
+resumen_interacciones <- aristas_red |>
+  count(tipo_interaccion, name = "cantidad") |>
+  mutate(porcentaje = cantidad / sum(cantidad)) |>
+  arrange(desc(cantidad))
+
+knitr::kable(
+  resumen_interacciones |>
+    mutate(porcentaje = formato_pct(porcentaje)) |>
+    select(tipo_interaccion, cantidad, porcentaje),
+  caption = "Interacciones incluidas en la red consolidada"
+)
+```
+
+## Métricas de red
+
+```{r network-metrics}
+aristas_ponderadas <- aristas_red |>
+  count(origen, destino, name = "peso") |>
+  mutate(distancia = 1 / peso)
+
+if (nrow(aristas_ponderadas) == 0) {
+  stop("No se generaron aristas válidas para construir la red.")
+}
+
+red_twitter <- graph_from_data_frame(aristas_ponderadas, directed = TRUE)
+
+pagerank_red <- page_rank(
+  red_twitter,
+  directed = TRUE,
+  weights = E(red_twitter)$peso
+)$vector
+
+metricas_red <- tibble::tibble(
+  screen_name = names(pagerank_red),
+  grado_entrada = as.numeric(degree(red_twitter, mode = "in")),
+  grado_salida = as.numeric(degree(red_twitter, mode = "out")),
+  interacciones_recibidas = as.numeric(
+    strength(red_twitter, mode = "in", weights = E(red_twitter)$peso)
+  ),
+  pagerank = as.numeric(pagerank_red),
+  betweenness = as.numeric(
+    betweenness(
+      red_twitter,
+      directed = TRUE,
+      weights = E(red_twitter)$distancia,
+      normalized = TRUE
+    )
+  )
+)
+
+menciones_recibidas <- aristas_red |>
+  filter(tipo_interaccion == "Mención") |>
+  count(destino, name = "menciones_recibidas") |>
+  rename(screen_name = destino)
+
+comentarios_recibidos <- aristas_red |>
+  filter(tipo_interaccion == "Respuesta") |>
+  count(destino, name = "comentarios_recibidos") |>
+  rename(screen_name = destino)
+
+retweets_recibidos_red <- aristas_red |>
+  filter(tipo_interaccion == "Retweet") |>
+  count(destino, name = "retweets_recibidos_red") |>
+  rename(screen_name = destino)
+
+citas_recibidas <- aristas_red |>
+  filter(tipo_interaccion == "Cita") |>
+  count(destino, name = "citas_recibidas") |>
+  rename(screen_name = destino)
+
+componentes <- components(as.undirected(red_twitter, mode = "collapse"))
+
+resumen_red <- tibble::tibble(
+  indicador = c(
+    "Nodos en la red",
+    "Aristas únicas ponderadas",
+    "Interacciones crudas",
+    "Componente débil principal",
+    "Proporción en el componente principal"
+  ),
+  valor = c(
+    formato_numero(vcount(red_twitter)),
+    formato_numero(ecount(red_twitter)),
+    formato_numero(nrow(aristas_red)),
+    formato_numero(max(componentes$csize)),
+    formato_pct(max(componentes$csize) / vcount(red_twitter))
+  )
+)
+
+knitr::kable(resumen_red, caption = "Resumen de la red consolidada")
+```
+
+### Interpretación de métricas
+
+| Métrica | Pregunta que responde | Lectura dentro de este proyecto |
+|---|---|---|
+| Grado de entrada | ¿Cuántas cuentas distintas interactúan con una cuenta? | Visibilidad o atención recibida. |
+| Grado de salida | ¿Con cuántas cuentas distintas interactúa una cuenta? | Actividad relacional. |
+| PageRank | ¿Qué tan importante es una cuenta según quiénes se conectan con ella? | Influencia estructural. |
+| Betweenness | ¿Qué tanto conecta una cuenta comunidades diferentes? | Rol de puente o intermediación. |
+
+## Visualización de la red
+
+Para facilitar la lectura, el gráfico muestra la subred inducida por las `r min(150, nrow(metricas_red))` cuentas con PageRank más alto. Las métricas, no obstante, se calcularon sobre la red consolidada completa.
+
+```{r network-plot, fig.width=13, fig.height=8}
+vertices_red <- metricas_red |>
+  mutate(
+    es_top = if_else(
+      pagerank >= quantile(pagerank, 0.98, na.rm = TRUE),
+      "Top 2% PageRank",
+      "Resto"
+    ),
+    ranking_pagerank = rank(-pagerank, ties.method = "first"),
+    etiqueta = if_else(ranking_pagerank <= 15, screen_name, NA_character_)
+  ) |>
+  rename(name = screen_name)
+
+red_visual <- graph_from_data_frame(
+  aristas_ponderadas,
+  vertices = vertices_red,
+  directed = TRUE
+)
+
+nodos_visualizacion <- vertices_red |>
+  slice_min(ranking_pagerank, n = min(150, nrow(vertices_red)), with_ties = FALSE) |>
+  pull(name)
+
+subred_visual <- induced_subgraph(
+  red_visual,
+  vids = V(red_visual)[name %in% nodos_visualizacion]
+)
+
+ggraph(subred_visual, layout = "fr") +
+  geom_edge_link(
+    aes(width = peso, alpha = peso),
+    color = "#4B5563",
+    show.legend = TRUE
+  ) +
+  scale_edge_width(range = c(0.25, 1.8), name = "Frecuencia") +
+  scale_edge_alpha(range = c(0.12, 0.75), guide = "none") +
+  geom_node_point(
+    aes(fill = es_top, size = pagerank),
+    shape = 21,
+    color = "#374151",
+    stroke = 0.55,
+    alpha = 1
+  ) +
+  scale_fill_manual(
+    values = c("Top 2% PageRank" = "#1565A7", "Resto" = "#FFFFFF"),
+    name = "Nivel de influencia"
+  ) +
+  scale_size_continuous(range = c(2.5, 10), name = "PageRank") +
+  geom_node_label(
+    aes(label = etiqueta),
+    repel = TRUE,
+    size = 3,
+    fontface = "bold",
+    color = "black",
+    fill = "white",
+    alpha = 0.92,
+    label.size = 0.2,
+    label.r = grid::unit(0.08, "lines"),
+    box.padding = 0.35,
+    point.padding = 0.5,
+    segment.color = "#6B7280"
+  ) +
+  labs(
+    title = "Red consolidada de interacciones entre cuentas",
+    subtitle = "Tamaño: PageRank | Azul: top 2% por PageRank | Se muestran las 150 cuentas más centrales"
+  ) +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "#EDEDED", color = NA),
+    panel.background = element_rect(fill = "#EDEDED", color = NA),
+    legend.background = element_rect(fill = "#EDEDED", color = NA),
+    legend.key = element_rect(fill = "#EDEDED", color = NA),
+    plot.title = element_text(hjust = 0.5, face = "bold", color = "#111827"),
+    plot.subtitle = element_text(hjust = 0.5, color = "#374151")
+  )
+```
+
+# Índice exploratorio de relevancia observable
+
+El índice integra seis componentes. Antes de ponderarlos, cada componente se transforma en un percentil para que sus escalas sean comparables.
+
+| Componente | Peso | Qué representa |
+|---|---:|---|
+| Seguidores observados | 20% | Alcance potencial. |
+| Engagement recibido | 25% | Respuesta recibida por publicaciones propias no-retweet. |
+| Menciones recibidas | 15% | Atención directa dentro de la conversación. |
+| Grado de entrada | 15% | Cantidad de cuentas distintas que interactúan con la cuenta. |
+| PageRank | 15% | Influencia estructural dentro de la red. |
+| Betweenness | 10% | Capacidad de conectar comunidades. |
+
+```{r assemble-user-dataset}
+dataset_usuarios <- actividad_usuarios |>
+  left_join(perfil_usuarios, by = "usuario_id") |>
+  left_join(menciones_recibidas, by = "screen_name") |>
+  left_join(comentarios_recibidos, by = "screen_name") |>
+  left_join(retweets_recibidos_red, by = "screen_name") |>
+  left_join(citas_recibidas, by = "screen_name") |>
+  left_join(metricas_red, by = "screen_name") |>
+  mutate(
+    across(
+      c(
+        menciones_recibidas, comentarios_recibidos, retweets_recibidos_red,
+        citas_recibidas, grado_entrada, grado_salida, interacciones_recibidas,
+        pagerank, betweenness
+      ),
+      ~ replace_na(.x, 0)
+    ),
+    p_seguidores = percentil_seguro(log1p(seguidores_observados)),
+    p_engagement = percentil_seguro(log1p(engagement_recibido)),
+    p_menciones = percentil_seguro(log1p(menciones_recibidas)),
+    p_grado_entrada = percentil_seguro(log1p(grado_entrada)),
+    p_pagerank = percentil_seguro(pagerank),
+    p_betweenness = percentil_seguro(betweenness),
+    puntaje_relevancia = round(
+      100 * (
+        0.20 * p_seguidores +
+          0.25 * p_engagement +
+          0.15 * p_menciones +
+          0.15 * p_grado_entrada +
+          0.15 * p_pagerank +
+          0.10 * p_betweenness
+      ),
+      2
+    )
+  )
+
+umbral_usuario_relevante <- quantile(
+  dataset_usuarios$puntaje_relevancia,
+  probs = 0.80,
+  na.rm = TRUE
+)
+
+dataset_usuarios <- dataset_usuarios |>
+  mutate(
+    usuario_relevante = if_else(
+      puntaje_relevancia >= umbral_usuario_relevante,
+      1L,
+      0L
+    )
+  )
+
+validacion_usuarios <- tibble::tibble(
+  indicador = c("Filas del dataset por usuario", "Cuentas emisoras únicas en la base"),
+  valor = c(nrow(dataset_usuarios), n_distinct(base_tweets$usuario_id))
+)
+
+knitr::kable(validacion_usuarios, caption = "Validación del dataset agregado por usuario")
+```
+
+## Perfil de las cuentas
+
+```{r account-profile-plots, fig.width=11, fig.height=5}
+antiguedad_plot <- dataset_usuarios |>
+  filter(!is.na(antiguedad_cuenta_anios), is.finite(antiguedad_cuenta_anios)) |>
+  mutate(intervalo_anios = floor(antiguedad_cuenta_anios)) |>
+  count(intervalo_anios, name = "cantidad") |>
+  mutate(destacado = if_else(cantidad == max(cantidad), "Intervalo modal", "Otros"))
+
+ggplot(antiguedad_plot, aes(x = factor(intervalo_anios), y = cantidad, fill = destacado)) +
+  geom_col(width = 0.9) +
+  scale_fill_manual(values = c("Intervalo modal" = "#1565A7", "Otros" = "#6B7280"), guide = "none") +
+  labs(
+    title = "Distribución de antigüedad de las cuentas",
+    subtitle = "Cada barra representa el intervalo [año, año + 1).",
+    x = "Antigüedad de la cuenta en años",
+    y = "Cantidad de usuarios"
+  ) +
+  tema_reporte()
+
+verificados_plot <- dataset_usuarios |>
+  count(cuenta_verificada, name = "cantidad") |>
+  mutate(
+    estado = if_else(cuenta_verificada, "Verificadas", "No verificadas"),
+    porcentaje = cantidad / sum(cantidad),
+    etiqueta = paste0(formato_numero(cantidad), " (", formato_pct(porcentaje), ")"),
+    estado = factor(estado, levels = c("Verificadas", "No verificadas"))
+  )
+
+ggplot(verificados_plot, aes(x = reorder(estado, cantidad), y = cantidad, fill = estado)) +
+  geom_col(width = 0.65) +
+  geom_text(aes(label = etiqueta), hjust = -0.1, fontface = "bold", size = 3.8) +
+  coord_flip() +
+  scale_fill_manual(values = c("Verificadas" = "#1565A7", "No verificadas" = "#6B7280"), guide = "none") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.16))) +
+  labs(
+    title = "Distribución de cuentas verificadas",
+    x = NULL,
+    y = "Cantidad de cuentas"
+  ) +
+  tema_reporte()
+```
+
+## Por qué los rankings aislados no bastan
+
+```{r top-rankings, fig.width=12, fig.height=5}
+top_mensajes <- dataset_usuarios |>
+  slice_max(cantidad_total_mensajes, n = 10, with_ties = FALSE) |>
+  mutate(screen_name = reorder(screen_name, cantidad_total_mensajes))
+
+top_seguidores <- dataset_usuarios |>
+  slice_max(seguidores_observados, n = 10, with_ties = FALSE) |>
+  mutate(screen_name = reorder(screen_name, seguidores_observados))
+
+top_engagement <- dataset_usuarios |>
+  slice_max(engagement_recibido, n = 10, with_ties = FALSE) |>
+  mutate(screen_name = reorder(screen_name, engagement_recibido))
+
+ggplot(top_mensajes, aes(x = screen_name, y = cantidad_total_mensajes)) +
+  geom_col(fill = "#1565A7") +
+  coord_flip() +
+  labs(title = "Top 10 por actividad", x = "Cuenta", y = "Mensajes") +
+  tema_reporte()
+
+ggplot(top_seguidores, aes(x = screen_name, y = seguidores_observados)) +
+  geom_col(fill = "#1565A7") +
+  coord_flip() +
+  scale_y_continuous(labels = formato_numero) +
+  labs(title = "Top 10 por seguidores", x = "Cuenta", y = "Seguidores") +
+  tema_reporte()
+
+ggplot(top_engagement, aes(x = screen_name, y = engagement_recibido)) +
+  geom_col(fill = "#1565A7") +
+  coord_flip() +
+  scale_y_continuous(labels = formato_numero) +
+  labs(title = "Top 10 por engagement recibido", x = "Cuenta", y = "Engagement") +
+  tema_reporte()
+```
+
+Los rankings anteriores responden preguntas distintas: actividad, alcance potencial y reacción recibida. Por ello, ninguno de ellos por sí solo describe completamente la relevancia dentro de la red.
+
+## Resultados del índice
+
+```{r relevance-index-results}
+top_relevantes <- dataset_usuarios |>
+  slice_max(puntaje_relevancia, n = 15, with_ties = FALSE) |>
+  mutate(screen_name = reorder(screen_name, puntaje_relevancia))
+
+knitr::kable(
+  top_relevantes |>
+    transmute(
+      cuenta = screen_name,
+      puntaje = puntaje_relevancia,
+      seguidores = formato_numero(seguidores_observados),
+      engagement = formato_numero(engagement_recibido),
+      grado_entrada,
+      pagerank = round(pagerank, 4),
+      betweenness = round(betweenness, 4)
+    ),
+  caption = "Top 15 de usuarios por índice exploratorio de relevancia"
+)
+
+ggplot(top_relevantes, aes(x = screen_name, y = puntaje_relevancia)) +
+  geom_col(fill = "#1565A7") +
+  coord_flip() +
+  geom_text(aes(label = round(puntaje_relevancia, 1)), hjust = -0.12, size = 3.4) +
+  scale_y_continuous(limits = c(0, max(top_relevantes$puntaje_relevancia) * 1.12)) +
+  labs(
+    title = "Top 15 de usuarios por relevancia observable",
+    subtitle = "Índice compuesto: alcance, engagement, menciones y centralidad de red.",
+    x = "Cuenta",
+    y = "Puntaje de relevancia (0–100)"
+  ) +
+  tema_reporte()
+```
+
+```{r followers-index-scatter}
+ggplot(
+  dataset_usuarios,
+  aes(
+    x = log1p(seguidores_observados),
+    y = puntaje_relevancia,
+    color = factor(usuario_relevante)
+  )
+) +
+  geom_point(alpha = 0.7, size = 2) +
+  scale_color_manual(
+    values = c("0" = "#6B7280", "1" = "#1565A7"),
+    labels = c("No relevante", "Relevante"),
+    name = "Clasificación"
+  ) +
+  labs(
+    title = "Seguidores y puntaje de relevancia",
+    subtitle = "El índice incorpora seguidores, pero no depende únicamente de ellos.",
+    x = "Log(1 + seguidores observados)",
+    y = "Puntaje de relevancia"
+  ) +
+  tema_reporte()
+```
+
+# Dataset por tweet y modelo logístico
+
+Para modelar la relevancia de un tweet se excluyen los retweets. Esta decisión evita atribuir a la cuenta que comparte un contenido la popularidad del tweet original.
+
+La variable objetivo se define así:
+
+$$
+\text{Engagement} = \text{favoritos} + \text{retweets}
+$$
+
+Un tweet es considerado relevante si su engagement se encuentra en el percentil 80 o superior de los tweets no-retweet.
+
+```{r tweet-dataset}
+dataset_tweets_modelo <- base_tweets |>
+  filter(!es_retweet) |>
+  transmute(
+    id_tweet,
+    usuario_id,
+    screen_name,
+    texto,
+    fecha_tweet,
+    hora_publicacion = hour(fecha_tweet),
+    dia_semana = wday(fecha_tweet, label = TRUE, week_start = 1),
+    antiguedad_cuenta_anios,
+    seguidores_autor = seguidores,
+    cuenta_verificada,
+    fuente = coalesce(fuente, "Sin dato"),
+    tipo_mensaje = factor(tipo_mensaje, levels = c("Cita", "Original", "Respuesta")),
+    ancho_texto,
+    tiene_hashtag,
+    cantidad_hashtags,
+    tiene_mencion,
+    cantidad_menciones,
+    tiene_url,
+    tiene_media,
+    media_type = coalesce(media_type, "Sin multimedia"),
+    polaridad,
+    likes = favoritos,
+    retweets = retweets,
+    engagement = favoritos + retweets
+  )
+
+umbral_relevancia_tweet <- quantile(
+  dataset_tweets_modelo$engagement,
+  probs = 0.80,
+  na.rm = TRUE
+)
+
+dataset_tweets_modelo <- dataset_tweets_modelo |>
+  mutate(
+    tweet_relevante = if_else(engagement >= umbral_relevancia_tweet, 1L, 0L)
+  )
+
+resumen_modelo_tweets <- dataset_tweets_modelo |>
+  count(tweet_relevante, name = "cantidad") |>
+  mutate(
+    clasificacion = if_else(tweet_relevante == 1, "Relevante", "No relevante"),
+    porcentaje = cantidad / sum(cantidad)
+  ) |>
+  select(clasificacion, cantidad, porcentaje)
+
+knitr::kable(
+  resumen_modelo_tweets |>
+    mutate(porcentaje = formato_pct(porcentaje)),
+  caption = paste0(
+    "Clasificación de tweets no-retweet; umbral de engagement: ",
+    formato_numero(umbral_relevancia_tweet)
+  )
+)
+```
+
+## Preparación y especificación del modelo
+
+El modelo no utiliza `likes`, `retweets` ni `engagement` como variables predictoras, porque dichas variables ya se utilizan para construir la etiqueta `tweet_relevante`. Incluirlas como predictores produciría fuga de información.
+
+```{r model-preparation}
+modelo_tweets <- dataset_tweets_modelo |>
+  mutate(
+    log_seguidores = log1p(seguidores_autor),
+    fuente_modelo = case_when(
+      fuente %in% c("Twitter for Android", "Twitter for iPhone", "Twitter Web App") ~ fuente,
+      TRUE ~ "Otra"
+    ),
+    cuenta_verificada = factor(as.character(cuenta_verificada), levels = c("FALSE", "TRUE")),
+    tipo_mensaje = factor(tipo_mensaje, levels = c("Cita", "Original", "Respuesta")),
+    polaridad = factor(polaridad, levels = c("negative", "neutral", "positive")),
+    fuente_modelo = factor(
+      fuente_modelo,
+      levels = c("Otra", "Twitter for Android", "Twitter for iPhone", "Twitter Web App")
+    ),
+    tiene_url = factor(as.character(tiene_url), levels = c("FALSE", "TRUE")),
+    tiene_media = factor(as.character(tiene_media), levels = c("FALSE", "TRUE"))
+  ) |>
+  filter(
+    !is.na(tweet_relevante),
+    !is.na(ancho_texto),
+    !is.na(antiguedad_cuenta_anios),
+    !is.na(polaridad),
+    !is.na(tipo_mensaje)
+  )
+
+modelo_logistico_completo <- glm(
+  tweet_relevante ~
+    log_seguidores +
+    cuenta_verificada +
+    antiguedad_cuenta_anios +
+    tipo_mensaje +
+    ancho_texto +
+    cantidad_hashtags +
+    cantidad_menciones +
+    tiene_url +
+    tiene_media +
+    polaridad +
+    hora_publicacion +
+    fuente_modelo,
+  family = binomial(link = "logit"),
+  data = modelo_tweets
+)
+
+# Modelo parsimonioso: conserva los predictores con sustento analítico y evidencia
+# en el modelo exploratorio completo. La comparación se documenta más abajo.
+modelo_logistico_final <- glm(
+  tweet_relevante ~
+    log_seguidores +
+    cuenta_verificada +
+    antiguedad_cuenta_anios +
+    tipo_mensaje +
+    cantidad_menciones +
+    tiene_url +
+    polaridad,
+  family = binomial(link = "logit"),
+  data = modelo_tweets
+)
+
+comparacion_modelos <- AIC(
+  modelo_logistico_completo,
+  modelo_logistico_final
+)
+
+knitr::kable(
+  comparacion_modelos,
+  caption = "Comparación por AIC entre el modelo completo y el modelo parsimonioso"
+)
+
+coeficientes_completos <- summary(modelo_logistico_completo)$coefficients
+
+variables_sin_evidencia <- tibble::tibble(
+  termino = rownames(coeficientes_completos),
+  estimado = coeficientes_completos[, "Estimate"],
+  p_valor = coeficientes_completos[, "Pr(>|z|)"]
+) |>
+  filter(
+    termino %in% c(
+      "ancho_texto", "cantidad_hashtags", "tiene_mediaTRUE", "hora_publicacion"
+    )
+  ) |>
+  mutate(
+    variable = recode(
+      termino,
+      ancho_texto = "Longitud del tweet",
+      cantidad_hashtags = "Cantidad de hashtags",
+      tiene_mediaTRUE = "Incluye multimedia",
+      hora_publicacion = "Hora de publicación"
+    ),
+    `p-valor` = signif(p_valor, 3)
+  ) |>
+  select(variable, `p-valor`)
+
+knitr::kable(
+  variables_sin_evidencia,
+  caption = "Variables sin evidencia individual de asociación clara en el modelo completo"
+)
+```
+
+## Odds ratios e intervalos de confianza
+
+```{r odds-ratios}
+coeficientes_modelo <- summary(modelo_logistico_final)$coefficients
+intervalos_modelo <- confint.default(modelo_logistico_final)
+
+tabla_or <- tibble::tibble(
+  termino = rownames(coeficientes_modelo),
+  estimado = coeficientes_modelo[, "Estimate"],
+  p_valor = coeficientes_modelo[, "Pr(>|z|)"],
+  or = exp(estimado),
+  ic_inferior = exp(intervalos_modelo[, 1]),
+  ic_superior = exp(intervalos_modelo[, 2])
+) |>
+  filter(termino != "(Intercept)") |>
+  mutate(
+    variable = case_when(
+      termino == "log_seguidores" ~ "Log(1 + seguidores)",
+      termino == "cuenta_verificadaTRUE" ~ "Cuenta verificada (vs. no verificada)",
+      termino == "antiguedad_cuenta_anios" ~ "Antigüedad de la cuenta (por año)",
+      termino == "tipo_mensajeOriginal" ~ "Tweet original (vs. cita)",
+      termino == "tipo_mensajeRespuesta" ~ "Respuesta (vs. cita)",
+      termino == "cantidad_menciones" ~ "Cantidad de menciones",
+      termino == "tiene_urlTRUE" ~ "Incluye URL (vs. sin URL)",
+      termino == "polaridadneutral" ~ "Polaridad neutral (vs. negativa)",
+      termino == "polaridadpositive" ~ "Polaridad positiva (vs. negativa)",
+      TRUE ~ termino
+    )
+  )
+
+knitr::kable(
+  tabla_or |>
+    transmute(
+      variable,
+      `Odds ratio` = round(or, 3),
+      `IC 95% inferior` = round(ic_inferior, 3),
+      `IC 95% superior` = round(ic_superior, 3),
+      `p-valor` = signif(p_valor, 3)
+    ),
+  caption = "Odds ratios del modelo logístico parsimonioso"
+)
+```
+
+```{r forest-plot, fig.width=12, fig.height=6}
+tabla_or_grafico <- tabla_or |>
+  mutate(
+    variable = factor(variable, levels = rev(variable[order(or)])),
+    significativo = if_else(p_valor < 0.05, "Significativo", "No significativo")
+  )
+
+ggplot(tabla_or_grafico, aes(x = or, y = variable)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "#374151") +
+  geom_segment(aes(x = ic_inferior, xend = ic_superior, yend = variable), linewidth = 0.8) +
+  geom_point(aes(color = significativo), size = 3) +
+  geom_text(
+    aes(label = paste0("OR = ", round(or, 2))),
+    hjust = -0.12,
+    size = 3.2,
+    color = "#111827"
+  ) +
+  scale_color_manual(values = c("Significativo" = "#1565A7", "No significativo" = "#6B7280"), guide = "none") +
+  scale_x_log10(
+    breaks = c(0.01, 0.05, 0.10, 0.25, 0.5, 1, 2, 5, 10, 20),
+    labels = c("0.01", "0.05", "0.10", "0.25", "0.5", "1", "2", "5", "10", "20"),
+    expand = expansion(mult = c(0.03, 0.35))
+  ) +
+  labs(
+    title = "Factores asociados con alta relevancia observable",
+    subtitle = "Odds ratios ajustados e intervalos de confianza del 95%.",
+    x = "Odds ratio (escala logarítmica)",
+    y = NULL,
+    caption = "La línea en OR = 1 representa ausencia de asociación. Las categorías de referencia están entre paréntesis."
+  ) +
+  tema_reporte()
+```
+
+## Ajuste y lectura del modelo
+
+```{r model-fit}
+r2_mcfadden <- 1 - (
+  modelo_logistico_final$deviance / modelo_logistico_final$null.deviance
+)
+
+resumen_ajuste <- tibble::tibble(
+  indicador = c(
+    "Observaciones utilizadas",
+    "AIC del modelo final",
+    "Pseudo R² de McFadden",
+    "Umbral de relevancia"
+  ),
+  valor = c(
+    nobs(modelo_logistico_final),
+    round(AIC(modelo_logistico_final), 2),
+    round(r2_mcfadden, 3),
+    umbral_relevancia_tweet
+  )
+)
+
+knitr::kable(resumen_ajuste, caption = "Indicadores de ajuste del modelo logístico")
+
+# Prueba de eliminación por término del modelo completo. Es preferible a interpretar
+# exclusivamente el anova secuencial, ya que evalúa el aporte de cada término manteniendo los demás.
+drop1(modelo_logistico_completo, test = "Chisq")
+```
+
+# Conclusiones y limitaciones
+
+## Conclusiones
+
+- La conversación analizada estuvo dominada por los retweets, lo que evidencia una dinámica de amplificación de contenido existente.
+- Los rankings simples por actividad, seguidores o engagement no son equivalentes: cada uno mide una dimensión distinta de la presencia de una cuenta.
+- El **índice exploratorio de relevancia observable** permite combinar alcance potencial, respuesta de la audiencia, atención directa y centralidad dentro de la red.
+- En el modelo logístico, las asociaciones deben leerse como relaciones observadas en esta muestra; no prueban causalidad.
+- Los resultados del modelo permiten evaluar cómo se relacionan el alcance, la verificación de cuenta, el tipo de publicación, las menciones, las URL y la polaridad con la probabilidad de que un tweet alcance alto engagement.
+
+## Limitaciones
+
+1. La base cubre un período corto y una conversación específica; no representa la totalidad de Twitter/X ni el comportamiento histórico completo de cada cuenta.
+2. La relevancia del usuario se define con un índice exploratorio cuyos pesos fueron establecidos como una decisión analítica del grupo.
+3. La relevancia del tweet se aproxima mediante engagement observable; no equivale necesariamente a impacto social, político o informativo.
+4. Las métricas de centralidad dependen de las interacciones disponibles en la muestra.
+5. El modelo logístico identifica asociaciones ajustadas, no relaciones causales. Factores externos no observados —tema coyuntural, algoritmo de la plataforma y exposición previa— también pueden afectar el engagement.
+6. El archivo presenta caracteres con codificación inconsistente en algunos textos. Esto no afecta de manera material la construcción de la red, ya que esta se basa en identificadores y handles estructurados; sin embargo, limita análisis semánticos profundos del texto.
+
+## Declaración de uso de inteligencia artificial
+
+Para el desarrollo de este proyecto se utilizó ChatGPT (GPT-5.5 Thinking) como herramienta de apoyo en la organización del código en R, la identificación y corrección de errores, la estructuración del análisis, la mejora de comentarios técnicos y la redacción de explicaciones metodológicas.
+
+La inteligencia artificial no sustituyó el trabajo analítico del grupo. Los integrantes revisaron, ajustaron y validaron el código utilizado, verificaron los resultados obtenidos en R y asumieron la responsabilidad por las decisiones metodológicas, la interpretación de las métricas de red, la construcción del índice exploratorio de relevancia observable y las conclusiones presentadas.
+
+En particular, las decisiones sobre la selección de variables, la definición de relevancia, las ponderaciones del índice, la construcción de la red de interacciones y la interpretación del modelo de regresión logística fueron revisadas y aprobadas por los integrantes del equipo.
