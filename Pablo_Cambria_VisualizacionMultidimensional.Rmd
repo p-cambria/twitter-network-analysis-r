@@ -1,0 +1,544 @@
+---
+title: "Ejericios de Visualización de Datos Multidimencionales en R"
+author: "Pablo Cambria"
+date: "2026-06-10"
+output: html_document
+---
+
+# Introducción
+
+Este proyecto tiene como objetivo aplicar técnicas de visualización de datos utilizando R y `ggplot2`, a partir del conjunto de datos de contaminación del aire de la Agencia de Protección Ambiental de los Estados Unidos, EPA, correspondiente al archivo `annual_conc_by_monitor_2022.csv`.
+
+El análisis se enfoca principalmente en el contaminante `PM2.5 - Local Conditions`, utilizando como variable numérica principal `Arithmetic.Mean`, la cual representa la concentración promedio del contaminante registrada por los monitores de calidad del aire.
+
+# Declaración sobre el uso de inteligencia artificial
+
+Para la elaboración de esta práctica se utilizó asistencia de inteligencia artificial (GPT-5.5) como apoyo en la organización del documento en formato R Markdown, la mejora de la estructura del código y el ajuste estético de los gráficos. El análisis, la selección de variables, la ejecución del código y la interpretación final de los resultados fueron revisados y adaptados por el autor de la práctica.
+
+# Carga de librerías
+
+```{r setup, message=FALSE, warning=FALSE}
+library(ggplot2)
+```
+
+# Importación y exploración inicial de los datos
+
+```{r importacion}
+datos <- read.csv("annual_conc_by_monitor_2022.csv")
+
+str(datos)
+names(datos)
+dim(datos)
+```
+
+En esta primera etapa se importó el conjunto de datos y se revisó su estructura general. La función `str()` permite conocer el tipo de variables disponibles, `names()` muestra los nombres de las columnas y `dim()` indica la cantidad de filas y columnas del archivo.
+
+# a. Histogramas de las variables envueltas
+
+En esta sección se presentan histogramas y gráficos de frecuencia para las variables principales del conjunto de datos: `State.Code`, `County.Code`, `Latitude`, `Longitude`, `Parameter.Name` y `Arithmetic.Mean`.
+
+## Histograma de State Code
+
+```{r hist-state-code}
+ggplot(datos, aes(x = State.Code)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  labs(
+    title = "Histograma de State Code",
+    x = "State Code",
+    y = "Frecuencia"
+  ) +
+  theme_minimal()
+```
+
+## Histograma de County Code
+
+```{r hist-county-code}
+ggplot(datos, aes(x = County.Code)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  labs(
+    title = "Histograma de County Code",
+    x = "County Code",
+    y = "Frecuencia"
+  ) +
+  theme_minimal()
+```
+
+## Histograma de Latitude
+
+```{r hist-latitude}
+ggplot(datos, aes(x = Latitude)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  labs(
+    title = "Histograma de Latitude",
+    x = "Latitude",
+    y = "Frecuencia"
+  ) +
+  theme_minimal()
+```
+
+## Histograma de Longitude
+
+```{r hist-longitude}
+ggplot(datos, aes(x = Longitude)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  labs(
+    title = "Histograma de Longitude",
+    x = "Longitude",
+    y = "Frecuencia"
+  ) +
+  theme_minimal()
+```
+
+## Frecuencia por Parameter Name
+
+La variable `Parameter.Name` es categórica, por lo que se representa mediante un gráfico de barras.
+
+```{r bar-parameter-name}
+ggplot(datos, aes(x = Parameter.Name)) +
+  geom_bar(fill = "tomato", color = "white") +
+  labs(
+    title = "Frecuencia por Parameter Name",
+    x = "Parameter Name",
+    y = "Frecuencia"
+  ) +
+  coord_flip() +
+  theme_minimal()
+```
+
+## Histograma de Arithmetic Mean
+
+```{r hist-arithmetic-mean-general}
+ggplot(datos, aes(x = Arithmetic.Mean)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "white") +
+  labs(
+    title = "Histograma de Arithmetic Mean",
+    x = "Arithmetic Mean",
+    y = "Frecuencia"
+  ) +
+  theme_minimal()
+```
+
+
+# b. Filtro y selección de datos para PM2.5
+
+Se filtran los datos para conservar únicamente las observaciones correspondientes al contaminante `PM2.5 - Local Conditions`.
+
+```{r filtro-pm25}
+pm25 <- datos[datos$Parameter.Name == "PM2.5 - Local Conditions", ]
+
+pm25 <- pm25[
+  !is.na(pm25$Arithmetic.Mean) &
+  !is.na(pm25$Latitude) &
+  !is.na(pm25$Longitude),
+]
+
+str(pm25)
+dim(pm25)
+```
+
+A partir de este punto, el análisis se enfoca en el dataframe `pm25`. La variable principal de análisis es `Arithmetic.Mean`, que representa la concentración promedio de PM2.5 registrada por los monitores.
+
+# c. Diagrama de densidad de Arithmetic Mean
+
+```{r densidad-arithmetic-mean}
+ggplot(pm25, aes(x = Arithmetic.Mean)) +
+  geom_density(fill = "lightblue", alpha = 0.5) +
+  labs(
+    title = "Diagrama de densidad de Arithmetic Mean",
+    subtitle = "Datos filtrados para PM2.5 - Local Conditions",
+    x = "Arithmetic Mean",
+    y = "Densidad"
+  ) +
+  theme_minimal()
+```
+
+
+
+# d. Boxplot tomando en cuenta los estados
+
+```{r boxplot-estados}
+ggplot(pm25, aes(x = reorder(State.Name, Arithmetic.Mean, median), 
+                 y = Arithmetic.Mean)) +
+  geom_boxplot(fill = "lightblue", color = "black") +
+  coord_flip() +
+  labs(
+    title = "Boxplot de Arithmetic Mean por estado",
+    subtitle = "PM2.5 - Local Conditions",
+    x = "Estado",
+    y = "Arithmetic Mean"
+  ) +
+  theme_minimal()
+```
+
+El boxplot permite comparar la distribución de `Arithmetic.Mean` entre los diferentes estados. A través de este gráfico se pueden observar diferencias en la mediana, la dispersión y la presencia de valores atípicos.
+
+# e. Mapas con sus correspondientes criterios
+
+## Mapa 1: concentración promedio de PM2.5 por ubicación
+
+```{r mapa-general}
+ggplot(pm25, aes(x = Longitude, y = Latitude, color = Arithmetic.Mean)) +
+  geom_point(alpha = 0.7, size = 2) +
+  coord_quickmap() +
+  labs(
+    title = "Mapa de concentración promedio de PM2.5",
+    subtitle = "Ubicación de monitores según Arithmetic Mean",
+    x = "Longitud",
+    y = "Latitud",
+    color = "PM2.5"
+  ) +
+  theme_minimal()
+```
+
+Este mapa muestra la ubicación geográfica de los monitores de calidad del aire. El color representa el valor de `Arithmetic.Mean`, permitiendo observar la distribución espacial de los niveles promedio de PM2.5.
+
+## Mapa 2: ubicaciones con niveles altos de PM2.5
+
+Para el segundo mapa se utiliza como criterio el percentil 75. Es decir, se seleccionan las observaciones cuyo valor de `Arithmetic.Mean` está dentro del 25% más alto del conjunto de datos.
+
+```{r mapa-p75}
+p75 <- quantile(pm25$Arithmetic.Mean, 0.75, na.rm = TRUE)
+p75
+
+pm25_alto <- pm25[pm25$Arithmetic.Mean >= p75, ]
+
+ggplot(pm25_alto, aes(x = Longitude, y = Latitude, color = Arithmetic.Mean)) +
+  geom_point(alpha = 0.8, size = 2.5) +
+  coord_quickmap() +
+  labs(
+    title = "Mapa de ubicaciones con niveles altos de PM2.5",
+    subtitle = "Criterio: Arithmetic Mean igual o superior al percentil 75",
+    x = "Longitud",
+    y = "Latitud",
+    color = "PM2.5"
+  ) +
+  theme_minimal()
+```
+
+Este mapa permite identificar las zonas geográficas con niveles relativamente altos de PM2.5 dentro del conjunto de datos filtrado.
+
+# f. Diagramas de Arithmetic Mean en relación con variables categóricas
+
+En esta sección se compara la variable numérica `Arithmetic.Mean` con variables categóricas, principalmente `State.Name` y `County.Name`. Estas variables permiten analizar diferencias en los niveles de PM2.5 entre estados y condados.
+
+## Distribución de Arithmetic Mean por estado
+
+```{r boxplot-arithmetic-estado}
+ggplot(pm25, aes(x = reorder(State.Name, Arithmetic.Mean, median), 
+                 y = Arithmetic.Mean)) +
+  geom_boxplot(fill = "lightblue", color = "black") +
+  coord_flip() +
+  labs(
+    title = "Distribución de Arithmetic Mean por estado",
+    subtitle = "PM2.5 - Local Conditions",
+    x = "Estado",
+    y = "Arithmetic Mean"
+  ) +
+  theme_minimal()
+```
+
+## Promedio de Arithmetic Mean por estado
+
+```{r promedio-estado}
+promedio_estado <- aggregate(
+  Arithmetic.Mean ~ State.Name, 
+  data = pm25, 
+  FUN = mean, 
+  na.rm = TRUE
+)
+
+promedio_estado <- promedio_estado[
+  order(promedio_estado$Arithmetic.Mean, decreasing = TRUE),
+]
+
+ggplot(promedio_estado, aes(x = reorder(State.Name, Arithmetic.Mean), 
+                            y = Arithmetic.Mean)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Promedio de Arithmetic Mean por estado",
+    subtitle = "Comparación de niveles promedio de PM2.5",
+    x = "Estado",
+    y = "Promedio de Arithmetic Mean"
+  ) +
+  theme_minimal()
+```
+
+## Distribución de Arithmetic Mean por condado
+
+Debido a que existen muchos condados, se seleccionan los 15 condados con mayor promedio de PM2.5 para facilitar la visualización.
+
+```{r boxplot-condados}
+promedio_condado <- aggregate(
+  Arithmetic.Mean ~ County.Name, 
+  data = pm25, 
+  FUN = mean, 
+  na.rm = TRUE
+)
+
+promedio_condado <- promedio_condado[
+  order(promedio_condado$Arithmetic.Mean, decreasing = TRUE),
+]
+
+top15_condado <- head(promedio_condado, 15)
+
+pm25_top_condados <- pm25[
+  pm25$County.Name %in% top15_condado$County.Name,
+]
+
+ggplot(pm25_top_condados, aes(x = reorder(County.Name, Arithmetic.Mean, median), 
+                              y = Arithmetic.Mean)) +
+  geom_boxplot(fill = "lightgreen", color = "black") +
+  coord_flip() +
+  labs(
+    title = "Distribución de Arithmetic Mean por condado",
+    subtitle = "Top 15 condados según promedio de PM2.5",
+    x = "Condado",
+    y = "Arithmetic Mean"
+  ) +
+  theme_minimal()
+```
+
+Estas visualizaciones muestran que los niveles de PM2.5 no se distribuyen de manera uniforme entre las categorías geográficas. Algunos estados y condados presentan mayores niveles promedio, mayor dispersión o valores atípicos.
+
+# g. Patrones de comportamiento de los datos
+
+A partir del análisis gráfico, se identifican varios patrones relevantes en el comportamiento de la variable `Arithmetic.Mean`:
+
+1. La distribución de `Arithmetic.Mean` se concentra principalmente en valores bajos o moderados de PM2.5.
+2. El histograma y la curva de densidad sugieren una distribución con posible asimetría positiva, debido a la presencia de una cola hacia la derecha.
+3. Los boxplots por estado muestran diferencias importantes en la mediana y en la variabilidad de los niveles de PM2.5.
+4. Algunos estados presentan valores atípicos altos, lo que puede indicar episodios particulares de mayor contaminación.
+5. Los mapas muestran que los niveles elevados de PM2.5 no se distribuyen de forma completamente uniforme en el territorio, sino que tienden a concentrarse en determinadas ubicaciones.
+
+En términos generales, los datos muestran un comportamiento heterogéneo. Esto significa que los niveles promedio de PM2.5 varían según el estado, el condado y la ubicación geográfica del monitor. Estas diferencias pueden estar relacionadas con factores como densidad poblacional, tráfico vehicular, actividad industrial, incendios forestales, condiciones climáticas o características locales de cada zona.
+
+# h. Histograma y curva de densidad de probabilidad de Arithmetic Mean
+
+```{r histograma-densidad}
+ggplot(pm25, aes(x = Arithmetic.Mean)) +
+  geom_histogram(
+    aes(y = after_stat(density)),
+    bins = 30,
+    fill = "lightgray",
+    color = "white"
+  ) +
+  geom_density(
+    color = "blue",
+    linewidth = 1
+  ) +
+  labs(
+    title = "Histograma y curva de densidad de Arithmetic Mean",
+    subtitle = "Distribución de PM2.5 - Local Conditions",
+    x = "Arithmetic Mean",
+    y = "Densidad de probabilidad"
+  ) +
+  theme_minimal()
+```
+
+El histograma muestra la distribución de los valores de `Arithmetic.Mean`, mientras que la curva de densidad permite observar de forma suavizada el comportamiento general de la variable. Esta visualización permite identificar concentración de valores, asimetría y posibles valores extremos.
+
+# i. Hipótesis sobre la función de distribución de los datos
+
+A partir de la observación del histograma y la curva de densidad, se plantea la hipótesis de que la variable `Arithmetic.Mean` no sigue una distribución normal perfecta. La distribución parece concentrarse en valores bajos o moderados, con una cola extendida hacia la derecha, lo cual sugiere una distribución asimétrica positiva.
+
+Para complementar esta observación, se utilizó EasyFit con una muestra aleatoria de 5,000 observaciones de la variable `Arithmetic.Mean`. EasyFit sugirió la distribución Dagum 4P como una de las distribuciones candidatas para representar el comportamiento de los datos.
+
+## Selección de muestra aleatoria para EasyFit
+
+```{r muestra-easyfit}
+arithmetic_mean <- data.frame(
+  Arithmetic.Mean = pm25$Arithmetic.Mean
+)
+
+arithmetic_mean <- arithmetic_mean[
+  !is.na(arithmetic_mean$Arithmetic.Mean),
+  ,
+  drop = FALSE
+]
+
+set.seed(123)
+
+n_muestra <- min(5000, nrow(arithmetic_mean))
+
+arithmetic_mean_5000 <- arithmetic_mean[
+  sample(1:nrow(arithmetic_mean), n_muestra),
+  ,
+  drop = FALSE
+]
+
+dim(arithmetic_mean_5000)
+
+#write.csv(
+#  arithmetic_mean_5000,
+#  file = "Arithmetic_Mean_PM25_5000.csv",
+#  row.names = FALSE
+#)
+```
+
+Debido a que EasyFit permite utilizar un máximo de 5,000 filas, se seleccionó una muestra aleatoria de 5,000 observaciones. La función `set.seed()` se utilizó para garantizar la reproducibilidad de la muestra.
+
+## Función Dagum 4P en R
+
+Los parámetros obtenidos en EasyFit para la distribución Dagum 4P fueron:
+
+* k = 0.54096
+* alpha = 9.3973
+* beta = 9.0194
+* gamma = -0.63304
+
+```{r dagum-function}
+ddagum4p <- function(x, k, alpha, beta, gamma) {
+  y <- x - gamma
+  
+  ifelse(
+    y > 0,
+    (alpha * k / beta) *
+      (y / beta)^(alpha * k - 1) *
+      (1 + (y / beta)^alpha)^(-k - 1),
+    0
+  )
+}
+
+k     <- 0.54096
+alpha <- 9.3973
+beta  <- 9.0194
+gamma <- -0.63304
+
+x <- pm25$Arithmetic.Mean
+x <- x[!is.na(x)]
+
+df_x <- data.frame(Arithmetic.Mean = x)
+```
+
+## Ajuste visual de Dagum 4P sobre Arithmetic Mean
+
+```{r dagum-plot}
+ggplot(df_x, aes(x = Arithmetic.Mean)) +
+  geom_histogram(
+    aes(y = after_stat(density)),
+    bins = 30,
+    fill = "lightgray",
+    color = "white"
+  ) +
+  stat_function(
+    fun = ddagum4p,
+    args = list(
+      k = k,
+      alpha = alpha,
+      beta = beta,
+      gamma = gamma
+    ),
+    color = "red",
+    linewidth = 1
+  ) +
+  labs(
+    title = "Ajuste Dagum 4P sobre Arithmetic Mean",
+    subtitle = "PM2.5 - Local Conditions",
+    x = "Arithmetic Mean",
+    y = "Densidad"
+  ) +
+  theme_minimal()
+```
+
+La curva Dagum 4P permite comparar visualmente la distribución teórica con la distribución observada de los datos. En el gráfico, las barras representan los valores observados de `Arithmetic.Mean`, mientras que la curva roja representa la distribución Dagum 4P ajustada con los parámetros obtenidos en EasyFit.
+
+La hipótesis principal es que `Arithmetic.Mean` presenta una distribución asimétrica positiva. Aunque la distribución Dagum 4P parece aproximarse visualmente al comportamiento general de los datos, esta conclusión debe interpretarse como una aproximación y debe complementarse con las pruebas de bondad de ajuste.
+
+# j. Comparación de niveles de polución por estados y regiones
+
+Para comparar los niveles de polución por regiones de Estados Unidos, se crea una variable llamada `Region`, agrupando los estados en las regiones: Northeast, Midwest, South y West.
+
+```{r crear-region}
+northeast <- c(
+  "Connecticut", "Maine", "Massachusetts", "New Hampshire", 
+  "Rhode Island", "Vermont", "New Jersey", "New York", 
+  "Pennsylvania"
+)
+
+midwest <- c(
+  "Indiana", "Illinois", "Michigan", "Ohio", "Wisconsin",
+  "Iowa", "Kansas", "Minnesota", "Missouri", "Nebraska",
+  "North Dakota", "South Dakota"
+)
+
+south <- c(
+  "Delaware", "District Of Columbia", "Florida", "Georgia",
+  "Maryland", "North Carolina", "South Carolina", "Virginia",
+  "West Virginia", "Alabama", "Kentucky", "Mississippi",
+  "Tennessee", "Arkansas", "Louisiana", "Oklahoma", "Texas"
+)
+
+west <- c(
+  "Arizona", "Colorado", "Idaho", "Montana", "Nevada",
+  "New Mexico", "Utah", "Wyoming", "Alaska", "California",
+  "Hawaii", "Oregon", "Washington"
+)
+
+pm25$Region <- ifelse(
+  pm25$State.Name %in% northeast, "Northeast",
+  ifelse(
+    pm25$State.Name %in% midwest, "Midwest",
+    ifelse(
+      pm25$State.Name %in% south, "South",
+      ifelse(
+        pm25$State.Name %in% west, "West",
+        "Other"
+      )
+    )
+  )
+)
+
+table(pm25$Region)
+```
+
+## Boxplot por región
+
+```{r boxplot-region}
+pm25_region <- pm25[pm25$Region != "Other", ]
+
+ggplot(pm25_region, aes(x = reorder(Region, Arithmetic.Mean, median), 
+                        y = Arithmetic.Mean)) +
+  geom_boxplot(fill = "lightblue", color = "black") +
+  labs(
+    title = "Comparación de PM2.5 por región",
+    subtitle = "Boxplot de Arithmetic Mean por región de Estados Unidos",
+    x = "Región",
+    y = "Arithmetic Mean"
+  ) +
+  theme_minimal()
+```
+
+## Promedio de Arithmetic Mean por región
+
+```{r promedio-region}
+promedio_region <- aggregate(
+  Arithmetic.Mean ~ Region,
+  data = pm25_region,
+  FUN = mean,
+  na.rm = TRUE
+)
+
+promedio_region <- promedio_region[
+  order(promedio_region$Arithmetic.Mean, decreasing = TRUE),
+]
+
+ggplot(promedio_region, aes(x = reorder(Region, Arithmetic.Mean), 
+                            y = Arithmetic.Mean)) +
+  geom_col(fill = "steelblue") +
+  labs(
+    title = "Promedio de Arithmetic Mean por región",
+    subtitle = "Comparación de niveles promedio de PM2.5",
+    x = "Región",
+    y = "Promedio de Arithmetic Mean"
+  ) +
+  theme_minimal()
+```
+
+La comparación por regiones permite observar diferencias generales en los niveles promedio de PM2.5. Los boxplots muestran la variabilidad dentro de cada región, mientras que el gráfico de barras resume el promedio regional. Esta comparación permite identificar si alguna región presenta mayores niveles típicos de contaminación o mayor presencia de valores extremos.
+
+# Conclusión
+
+El análisis visual permitió identificar patrones importantes en los niveles promedio de PM2.5. La variable `Arithmetic.Mean` muestra una distribución concentrada en valores bajos o moderados, con presencia de valores altos que sugieren asimetría positiva. Las comparaciones por estado, condado y región evidencian que los niveles de contaminación no se distribuyen de manera uniforme, sino que varían según la ubicación geográfica.
+
+Los mapas permiten visualizar espacialmente estas diferencias, mientras que los boxplots y gráficos de barras facilitan la comparación entre categorías. Finalmente, el ajuste visual de la distribución Dagum 4P sugiere que esta distribución puede ser una candidata para representar el comportamiento de la variable `Arithmetic.Mean`, aunque su validez debe evaluarse junto con las pruebas de bondad de ajuste obtenidas en EasyFit.
